@@ -340,6 +340,20 @@ final class NotebookStore {
     }
 }
 
+// MARK: - Device Classification Helper
+
+func isDuoDevice(geometrySize: CGSize) -> Bool {
+    #if targetEnvironment(simulator)
+    if let model = ProcessInfo.processInfo.environment["SIMULATOR_MODEL_IDENTIFIER"], model.contains("iPhone19,4") {
+        return true
+    }
+    #endif
+    let maxDim = max(geometrySize.width, geometrySize.height)
+    let minDim = min(geometrySize.width, geometrySize.height)
+    let ratio = maxDim / max(minDim, 1)
+    return ratio < 1.8
+}
+
 // MARK: - Main Content View
 
 struct ContentView: View {
@@ -486,6 +500,7 @@ struct NotebookCoverView: View {
             let totalW = geo.size.width
             let safeAreaTop = geo.safeAreaInsets.top
             let safeAreaBottom = geo.safeAreaInsets.bottom
+            let isDuo = isDuoDevice(geometrySize: geo.size)
 
             ZStack {
                 // 1. Heavy Cardstock Cover Base
@@ -571,7 +586,9 @@ struct NotebookCoverView: View {
                 // 5. Stamped Cover Layout
                 VStack(spacing: 0) {
                     // Header Bar: 3 Uniform Stamped Buttons with Rectangular Box & Curved Corners like Cover Letter (No system pill, left-shifted)
-                    let cameraRowTopPadding: CGFloat = safeAreaTop > 0 ? max(30.0, (safeAreaTop - 26) / 2 + 18) : 30.0
+                    let cameraRowTopPadding: CGFloat = isDuo
+                        ? (safeAreaTop > 0 ? max(30.0, (safeAreaTop - 26) / 2 + 18) : 30.0)
+                        : max(safeAreaTop + 8, 54.0)
 
                     HStack(spacing: 8) {
                         // 1. 3-Pack Shelf Button
@@ -636,7 +653,7 @@ struct NotebookCoverView: View {
 
                         Spacer()
                     }
-                    .padding(.leading, 30)
+                    .padding(.leading, isDuo ? 30 : 20)
                     .padding(.trailing, 18)
                     .padding(.top, cameraRowTopPadding)
 
@@ -699,8 +716,8 @@ struct NotebookCoverView: View {
                         RoundedRectangle(cornerRadius: 6)
                             .stroke(notebook.coverColor.textColor.opacity(0.4), lineWidth: 1.5)
                     )
-                    .padding(.leading, 32)
-                    .padding(.trailing, 22)
+                    .padding(.leading, isDuo ? 32 : 24)
+                    .padding(.trailing, isDuo ? 22 : 20)
 
                     Spacer(minLength: 20)
 
@@ -713,12 +730,16 @@ struct NotebookCoverView: View {
                         Text("FOLIO NOTEBOOK CO. · CUPERTINO & CHICAGO · U.S.A.")
                             .font(.system(size: 8.5, weight: .bold, design: .monospaced))
                             .foregroundColor(notebook.coverColor.textColor.opacity(0.65))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.85)
 
                         Text("DURABLE WATER-RESISTANT COVER · BOUND WITH PRIDE")
                             .font(.system(size: 8, weight: .semibold, design: .monospaced))
                             .foregroundColor(notebook.coverColor.textColor.opacity(0.5))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.85)
                     }
-                    .padding(.leading, 24)
+                    .padding(.leading, isDuo ? 24 : 16)
                     .padding(.trailing, 16)
                     .padding(.bottom, max(24, safeAreaBottom + 14))
                 }
@@ -1000,6 +1021,7 @@ struct SingleSpreadPageView: View {
     let spreadCount: Int
     let safeAreaTop: CGFloat
     let safeAreaBottom: CGFloat
+    var isDuo: Bool = false
     let onUpdateSpread: (NotebookSpread) -> Void
     let onOpenGuide: () -> Void
     let onOpenShelf: () -> Void
@@ -1037,21 +1059,23 @@ struct SingleSpreadPageView: View {
             PaperPatternView(style: notebook.paperStyle)
                 .clipShape(RoundedRectangle(cornerRadius: 12))
 
-            // Uniform top padding moving UI elements closer to the top of the screen across all poses
-            let pageTopPadding: CGFloat = safeAreaTop > 0 ? max(22.0, (safeAreaTop - 24) / 2 + 12) : 22.0
+            // Adaptive top padding: elevated for Duo, safe-area clear for Dynamic Island / notch iPhones
+            let pageTopPadding: CGFloat = isDuo
+                ? (safeAreaTop > 0 ? max(22.0, (safeAreaTop - 24) / 2 + 12) : 22.0)
+                : max(safeAreaTop + 8, 50.0)
 
             if isLeft {
                 leftPageContent
                     .padding(.top, pageTopPadding)
                     .padding(.bottom, max(14, safeAreaBottom + 4))
-                    .padding(.leading, isWideDisplay ? 20 : 16)
-                    .padding(.trailing, isWideDisplay ? 16 : 16)
+                    .padding(.leading, isWideDisplay ? 20 : (isDuo ? 16 : 14))
+                    .padding(.trailing, isWideDisplay ? 16 : (isDuo ? 16 : 14))
             } else {
                 rightPageContent
                     .padding(.top, pageTopPadding)
                     .padding(.bottom, max(14, safeAreaBottom + 4))
-                    .padding(.leading, isWideDisplay ? 16 : 16)
-                    .padding(.trailing, isWideDisplay ? 20 : 16)
+                    .padding(.leading, isWideDisplay ? 16 : (isDuo ? 16 : 14))
+                    .padding(.trailing, isWideDisplay ? 20 : (isDuo ? 16 : 14))
             }
         }
         .overlay(
@@ -1075,7 +1099,7 @@ struct SingleSpreadPageView: View {
     private var leftPageContent: some View {
         VStack(alignment: .leading, spacing: 12) {
             // Left page header (Buttons safely grouped on left/center away from camera/clock)
-            HStack(alignment: .center, spacing: 8) {
+            HStack(alignment: .center, spacing: isWideDisplay ? 8 : 6) {
                 Button(action: {
                     UIImpactFeedbackGenerator(style: .light).impactOccurred()
                     onOpenShelf()
@@ -1098,12 +1122,16 @@ struct SingleSpreadPageView: View {
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text("FIELD OBSERVATIONS")
-                        .font(.system(size: 12, weight: .black, design: .default))
-                        .tracking(1.2)
+                        .font(.system(size: isWideDisplay ? 12 : 11, weight: .black, design: .default))
+                        .tracking(1.0)
                         .foregroundColor(Color(red: 0.25, green: 0.22, blue: 0.18))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
                     Text("\(spread.dateStamp) · \(spread.weatherStamp)")
                         .font(.system(size: 8, weight: .bold, design: .monospaced))
                         .foregroundColor(Color(red: 0.45, green: 0.40, blue: 0.35))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
                 }
 
                 Button(action: {
@@ -1235,16 +1263,22 @@ struct SingleSpreadPageView: View {
     private var rightPageContent: some View {
         VStack(alignment: .leading, spacing: 10) {
             // Right page header (Buttons safely grouped on left/center away from persistent clock and camera)
-            HStack(alignment: .center, spacing: 8) {
+            HStack(alignment: .center, spacing: isWideDisplay ? 8 : 6) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(rightPageMode == .memo ? "MEMO & LOG BOOK" : "FIELD SKETCH")
-                        .font(.system(size: 12, weight: .black, design: .default))
-                        .tracking(1.2)
+                        .font(.system(size: isWideDisplay ? 12 : 11, weight: .black, design: .default))
+                        .tracking(1.0)
                         .foregroundColor(Color(red: 0.25, green: 0.22, blue: 0.18))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
                     Text("LOC: \(spread.locationStamp)")
                         .font(.system(size: 8.5, weight: .bold, design: .monospaced))
                         .foregroundColor(Color(red: 0.45, green: 0.40, blue: 0.35))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
                 }
+
+                Spacer(minLength: 0)
 
                 // Mode Toggle: Box Style with Curved Corners (Replaced liquid glass toggle)
                 HStack(spacing: 3) {
@@ -1423,7 +1457,7 @@ struct NotebookInteriorView: View {
         max(1, notebook.spreads.count * 2)
     }
 
-    private func singlePageView(for index: Int, safeAreaTop: CGFloat, safeAreaBottom: CGFloat) -> some View {
+    private func singlePageView(for index: Int, safeAreaTop: CGFloat, safeAreaBottom: CGFloat, isDuo: Bool) -> some View {
         let spreadIdx = max(0, min(notebook.spreads.count - 1, index / 2))
         let isLeft = (index % 2 == 0)
         let spread = notebook.spreads[spreadIdx]
@@ -1436,6 +1470,7 @@ struct NotebookInteriorView: View {
             spreadCount: notebook.spreads.count,
             safeAreaTop: safeAreaTop,
             safeAreaBottom: safeAreaBottom,
+            isDuo: isDuo,
             onUpdateSpread: onUpdateSpread,
             onOpenGuide: onOpenGuide,
             onOpenShelf: onOpenShelf,
@@ -1491,6 +1526,7 @@ struct NotebookInteriorView: View {
             let pageW = isWideDisplay ? halfW : totalW
             let safeAreaTop = geo.safeAreaInsets.top
             let safeAreaBottom = max(geo.safeAreaInsets.bottom, 24.0)
+            let isDuo = isDuoDevice(geometrySize: geo.size)
 
             ZStack {
                 // Layer 1: Underneath Page (revealed when curling)
@@ -1506,6 +1542,7 @@ struct NotebookInteriorView: View {
                                     spreadCount: notebook.spreads.count,
                                     safeAreaTop: safeAreaTop,
                                     safeAreaBottom: safeAreaBottom,
+                                    isDuo: isDuo,
                                     onUpdateSpread: onUpdateSpread,
                                     onOpenGuide: onOpenGuide,
                                     onOpenShelf: onOpenShelf,
@@ -1521,6 +1558,7 @@ struct NotebookInteriorView: View {
                                     spreadCount: notebook.spreads.count,
                                     safeAreaTop: safeAreaTop,
                                     safeAreaBottom: safeAreaBottom,
+                                    isDuo: isDuo,
                                     onUpdateSpread: onUpdateSpread,
                                     onOpenGuide: onOpenGuide,
                                     onOpenShelf: onOpenShelf,
@@ -1536,6 +1574,7 @@ struct NotebookInteriorView: View {
                                     spreadCount: notebook.spreads.count,
                                     safeAreaTop: safeAreaTop,
                                     safeAreaBottom: safeAreaBottom,
+                                    isDuo: isDuo,
                                     onUpdateSpread: onUpdateSpread,
                                     onOpenGuide: onOpenGuide,
                                     onOpenShelf: onOpenShelf,
@@ -1551,6 +1590,7 @@ struct NotebookInteriorView: View {
                                     spreadCount: notebook.spreads.count,
                                     safeAreaTop: safeAreaTop,
                                     safeAreaBottom: safeAreaBottom,
+                                    isDuo: isDuo,
                                     onUpdateSpread: onUpdateSpread,
                                     onOpenGuide: onOpenGuide,
                                     onOpenShelf: onOpenShelf,
@@ -1566,7 +1606,8 @@ struct NotebookInteriorView: View {
                             singlePageView(
                                 for: nextIdx < totalSinglePages ? nextIdx : totalSinglePages - 1,
                                 safeAreaTop: safeAreaTop,
-                                safeAreaBottom: safeAreaBottom
+                                safeAreaBottom: safeAreaBottom,
+                                isDuo: isDuo
                             )
                             .frame(width: totalW, height: totalH)
                         } else {
@@ -1574,7 +1615,8 @@ struct NotebookInteriorView: View {
                             singlePageView(
                                 for: prevIdx,
                                 safeAreaTop: safeAreaTop,
-                                safeAreaBottom: safeAreaBottom
+                                safeAreaBottom: safeAreaBottom,
+                                isDuo: isDuo
                             )
                             .frame(width: totalW, height: totalH)
                         }
@@ -1593,6 +1635,7 @@ struct NotebookInteriorView: View {
                                 spreadCount: notebook.spreads.count,
                                 safeAreaTop: safeAreaTop,
                                 safeAreaBottom: safeAreaBottom,
+                                isDuo: isDuo,
                                 onUpdateSpread: onUpdateSpread,
                                 onOpenGuide: onOpenGuide,
                                 onOpenShelf: onOpenShelf,
@@ -1608,6 +1651,7 @@ struct NotebookInteriorView: View {
                                 spreadCount: notebook.spreads.count,
                                 safeAreaTop: safeAreaTop,
                                 safeAreaBottom: safeAreaBottom,
+                                isDuo: isDuo,
                                 onUpdateSpread: onUpdateSpread,
                                 onOpenGuide: onOpenGuide,
                                 onOpenShelf: onOpenShelf,
@@ -1619,7 +1663,8 @@ struct NotebookInteriorView: View {
                         singlePageView(
                             for: singlePageIndex,
                             safeAreaTop: safeAreaTop,
-                            safeAreaBottom: safeAreaBottom
+                            safeAreaBottom: safeAreaBottom,
+                            isDuo: isDuo
                         )
                         .frame(width: totalW, height: totalH)
                     }
