@@ -342,16 +342,20 @@ final class NotebookStore {
 
 // MARK: - Device Classification Helper
 
-func isDuoDevice(geometrySize: CGSize) -> Bool {
-    #if targetEnvironment(simulator)
-    if let model = ProcessInfo.processInfo.environment["SIMULATOR_MODEL_IDENTIFIER"], model.contains("iPhone19,4") {
-        return true
-    }
-    #endif
+func isDuoAspectRatio(geometrySize: CGSize) -> Bool {
     let maxDim = max(geometrySize.width, geometrySize.height)
     let minDim = min(geometrySize.width, geometrySize.height)
     let ratio = maxDim / max(minDim, 1)
-    return ratio < 1.8
+    return ratio < 1.6
+}
+
+func isDuoDevice(geometrySize: CGSize) -> Bool {
+    #if targetEnvironment(simulator)
+    if let model = ProcessInfo.processInfo.environment["SIMULATOR_MODEL_IDENTIFIER"] {
+        return model.contains("iPhone19,4")
+    }
+    #endif
+    return isDuoAspectRatio(geometrySize: geometrySize)
 }
 
 // MARK: - Main Content View
