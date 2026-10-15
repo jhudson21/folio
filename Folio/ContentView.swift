@@ -588,7 +588,7 @@ struct NotebookCoverView: View {
                     // Header Bar: 3 Uniform Stamped Buttons with Rectangular Box & Curved Corners like Cover Letter (No system pill, left-shifted)
                     let cameraRowTopPadding: CGFloat = isDuo
                         ? (safeAreaTop > 0 ? max(30.0, (safeAreaTop - 26) / 2 + 18) : 30.0)
-                        : max(safeAreaTop + 20, 64.0)
+                        : max(safeAreaTop + 36, 78.0)
 
                     HStack(spacing: 8) {
                         // 1. 3-Pack Shelf Button
@@ -1062,7 +1062,7 @@ struct SingleSpreadPageView: View {
             // Adaptive top padding: elevated for Duo, safe-area clear for Dynamic Island / notch iPhones
             let pageTopPadding: CGFloat = isDuo
                 ? (safeAreaTop > 0 ? max(22.0, (safeAreaTop - 24) / 2 + 12) : 22.0)
-                : max(safeAreaTop + 20, 60.0)
+                : max(safeAreaTop + 36, 72.0)
 
             if isLeft {
                 leftPageContent
