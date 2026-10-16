@@ -1441,6 +1441,119 @@ struct SingleSpreadPageView: View {
 
 // MARK: - Notebook Interior (Two-Page Spread with Physical Page Curl)
 
+// MARK: - Kindle Page Curl Geometry & Physics
+
+struct KindleCurlGeometry2D {
+    struct CurlState {
+        let cornerBottom: CGPoint
+        let cornerTop: CGPoint?
+        let creaseBottom: CGPoint
+        let creaseTopSide: CGPoint
+        let creaseHitsSide: Bool
+        let ctrlBottom: CGPoint
+        let ctrlSide: CGPoint
+        let liftHeight: CGFloat
+        let progress: CGFloat
+    }
+
+    static func calculate(
+        corner: CGPoint,
+        restCorner: CGPoint,
+        totalSize: CGSize,
+        isFromRight: Bool
+    ) -> CurlState {
+        let totalW = totalSize.width
+        let totalH = totalSize.height
+
+        let xc = corner.x
+        let yc = corner.y
+        let restX = restCorner.x
+        let restY = restCorner.y
+
+        let liftHeight = max(0.0, totalH - yc)
+        let midX = (restX + xc) / 2.0
+        let midY = (restY + yc) / 2.0
+
+        var vx = xc - restX
+        var vy = yc - restY
+
+        if abs(vx) < 1e-4 { vx = isFromRight ? -1e-4 : 1e-4 }
+        if abs(vy) < 1e-4 { vy = -1e-4 }
+
+        // Crease line intersection with bottom edge y = totalH
+        let xb = min(totalW, max(0.0, midX - (totalH - midY) * (vy / vx)))
+        let pBottom = CGPoint(x: xb, y: totalH)
+
+        // Crease line intersection with outer side or top edge
+        var pTopSide: CGPoint
+        let creaseHitsSide: Bool
+        if isFromRight {
+            let yr = midY - (totalW - midX) * (vx / vy)
+            if yr >= 0.0 && yr <= totalH {
+                creaseHitsSide = true
+                pTopSide = CGPoint(x: totalW, y: yr)
+            } else {
+                creaseHitsSide = false
+                let xt = midX + midY * (vy / vx)
+                pTopSide = CGPoint(x: min(totalW, max(0.0, xt)), y: 0.0)
+            }
+        } else {
+            let yl = midY - (0.0 - midX) * (vx / vy)
+            if yl >= 0.0 && yl <= totalH {
+                creaseHitsSide = true
+                pTopSide = CGPoint(x: 0.0, y: yl)
+            } else {
+                creaseHitsSide = false
+                let xt = midX + midY * (vy / vx)
+                pTopSide = CGPoint(x: min(totalW, max(0.0, xt)), y: 0.0)
+            }
+        }
+
+        // Lifted bottom edge control point (organic paper curve bowing downward)
+        let ctrlBottomX = (xb + xc) / 2.0 + (isFromRight ? 12.0 : -12.0)
+        let ctrlBottomY = (totalH + yc) / 2.0 + min(26.0, liftHeight * 0.22)
+        let ctrlBottom = CGPoint(x: ctrlBottomX, y: ctrlBottomY)
+
+        // Reflected top corner when crease line exits through the top edge
+        var cornerTop: CGPoint? = nil
+        if !creaseHitsSide {
+            let restTop = CGPoint(x: isFromRight ? totalW : 0.0, y: 0.0)
+            let a = pTopSide.y - pBottom.y
+            let b = -(pTopSide.x - pBottom.x)
+            let c = (pTopSide.x - pBottom.x) * pBottom.y - (pTopSide.y - pBottom.y) * pBottom.x
+            let denom = a * a + b * b
+            if denom > 1e-4 {
+                let d = (a * restTop.x + b * restTop.y + c) / denom
+                cornerTop = CGPoint(x: restTop.x - 2 * a * d, y: restTop.y - 2 * b * d)
+            }
+        }
+
+        // Lifted outer side control point
+        let targetOuter = cornerTop ?? pTopSide
+        let ctrlSideX = (targetOuter.x + xc) / 2.0 + (isFromRight ? 8.0 : -8.0)
+        let ctrlSideY = (targetOuter.y + yc) / 2.0
+        let ctrlSide = CGPoint(x: ctrlSideX, y: ctrlSideY)
+
+        let totalTravel = totalW
+        let currentDist = isFromRight ? (totalW - xc) : xc
+        let progress = max(0.0, min(1.0, currentDist / totalTravel))
+
+        return CurlState(
+            cornerBottom: corner,
+            cornerTop: cornerTop,
+            creaseBottom: pBottom,
+            creaseTopSide: pTopSide,
+            creaseHitsSide: creaseHitsSide,
+            ctrlBottom: ctrlBottom,
+            ctrlSide: ctrlSide,
+            liftHeight: liftHeight,
+            progress: progress
+        )
+    }
+}
+
+// MARK: - Notebook Interior (Two-Page Spread with Interactive 2D Page Turn)
+
 struct NotebookInteriorView: View {
     let notebook: FieldNotebook
     @Binding var currentSpreadIndex: Int
@@ -1451,10 +1564,11 @@ struct NotebookInteriorView: View {
     let onOpenGuide: () -> Void
     let onOpenShelf: () -> Void
 
-    @State private var turnProgress: CGFloat = 0.0
+    @State private var dragOffset: CGSize = .zero
     @State private var isDragging: Bool = false
     @State private var isFromRight: Bool = true
     @State private var isAnimatingTurn: Bool = false
+    @State private var turnProgress: CGFloat = 0.0
     @State private var singlePageIndex: Int = 0
 
     var totalSinglePages: Int {
@@ -1532,83 +1646,80 @@ struct NotebookInteriorView: View {
             let safeAreaBottom = max(geo.safeAreaInsets.bottom, 24.0)
             let isDuo = isDuoDevice(geometrySize: geo.size)
 
+            let restCorner = CGPoint(x: isFromRight ? totalW : 0.0, y: totalH)
+            let cornerPoint: CGPoint = {
+                if isDragging {
+                    let maxSweep = totalW * 1.05
+                    let rawDx = dragOffset.width
+                    let rawDy = dragOffset.height
+
+                    let dx = isFromRight ? max(-maxSweep, min(15.0, rawDx)) : min(maxSweep, max(-15.0, rawDx))
+                    let dy = max(-totalH * 0.75, min(15.0, rawDy))
+
+                    return CGPoint(x: restCorner.x + dx, y: restCorner.y + dy)
+                } else if turnProgress > 0.0 {
+                    let t = turnProgress
+                    let arcLift = -sin(t * .pi) * min(160.0, totalH * 0.28)
+                    let xc = isFromRight ? (totalW - totalW * t) : (totalW * t)
+                    let yc = totalH + arcLift
+                    return CGPoint(x: xc, y: yc)
+                } else {
+                    return restCorner
+                }
+            }()
+
+            let curl = KindleCurlGeometry2D.calculate(
+                corner: cornerPoint,
+                restCorner: restCorner,
+                totalSize: geo.size,
+                isFromRight: isFromRight
+            )
+
+            let isTurnActive = isDragging || turnProgress > 0.001
+
             ZStack {
-                // Layer 1: Underneath Page (revealed when curling)
-                if turnProgress > 0 {
+                // Layer 1: Underneath Target Spread / Page
+                if isTurnActive {
                     if isWideDisplay {
+                        let targetSpread = isFromRight ? nextSpread : prevSpread
                         HStack(spacing: 0) {
-                            if isFromRight {
-                                SingleSpreadPageView(
-                                    notebook: notebook,
-                                    spread: turnProgress > 0.45 ? nextSpread : currentSpread,
-                                    isLeft: true,
-                                    isWideDisplay: isWideDisplay,
-                                    spreadCount: notebook.spreads.count,
-                                    safeAreaTop: safeAreaTop,
-                                    safeAreaBottom: safeAreaBottom,
-                                    isDuo: isDuo,
-                                    onUpdateSpread: onUpdateSpread,
-                                    onOpenGuide: onOpenGuide,
-                                    onOpenShelf: onOpenShelf,
-                                    onClose: onClose
-                                )
-                                .frame(width: pageW, height: totalH)
+                            SingleSpreadPageView(
+                                notebook: notebook,
+                                spread: targetSpread,
+                                isLeft: true,
+                                isWideDisplay: isWideDisplay,
+                                spreadCount: notebook.spreads.count,
+                                safeAreaTop: safeAreaTop,
+                                safeAreaBottom: safeAreaBottom,
+                                isDuo: isDuo,
+                                onUpdateSpread: onUpdateSpread,
+                                onOpenGuide: onOpenGuide,
+                                onOpenShelf: onOpenShelf,
+                                onClose: onClose
+                            )
+                            .frame(width: pageW, height: totalH)
 
-                                SingleSpreadPageView(
-                                    notebook: notebook,
-                                    spread: nextSpread,
-                                    isLeft: false,
-                                    isWideDisplay: isWideDisplay,
-                                    spreadCount: notebook.spreads.count,
-                                    safeAreaTop: safeAreaTop,
-                                    safeAreaBottom: safeAreaBottom,
-                                    isDuo: isDuo,
-                                    onUpdateSpread: onUpdateSpread,
-                                    onOpenGuide: onOpenGuide,
-                                    onOpenShelf: onOpenShelf,
-                                    onClose: onClose
-                                )
-                                .frame(width: pageW, height: totalH)
-                            } else {
-                                SingleSpreadPageView(
-                                    notebook: notebook,
-                                    spread: prevSpread,
-                                    isLeft: true,
-                                    isWideDisplay: isWideDisplay,
-                                    spreadCount: notebook.spreads.count,
-                                    safeAreaTop: safeAreaTop,
-                                    safeAreaBottom: safeAreaBottom,
-                                    isDuo: isDuo,
-                                    onUpdateSpread: onUpdateSpread,
-                                    onOpenGuide: onOpenGuide,
-                                    onOpenShelf: onOpenShelf,
-                                    onClose: onClose
-                                )
-                                .frame(width: pageW, height: totalH)
-
-                                SingleSpreadPageView(
-                                    notebook: notebook,
-                                    spread: turnProgress > 0.45 ? prevSpread : currentSpread,
-                                    isLeft: false,
-                                    isWideDisplay: isWideDisplay,
-                                    spreadCount: notebook.spreads.count,
-                                    safeAreaTop: safeAreaTop,
-                                    safeAreaBottom: safeAreaBottom,
-                                    isDuo: isDuo,
-                                    onUpdateSpread: onUpdateSpread,
-                                    onOpenGuide: onOpenGuide,
-                                    onOpenShelf: onOpenShelf,
-                                    onClose: onClose
-                                )
-                                .frame(width: pageW, height: totalH)
-                            }
+                            SingleSpreadPageView(
+                                notebook: notebook,
+                                spread: targetSpread,
+                                isLeft: false,
+                                isWideDisplay: isWideDisplay,
+                                spreadCount: notebook.spreads.count,
+                                safeAreaTop: safeAreaTop,
+                                safeAreaBottom: safeAreaBottom,
+                                isDuo: isDuo,
+                                onUpdateSpread: onUpdateSpread,
+                                onOpenGuide: onOpenGuide,
+                                onOpenShelf: onOpenShelf,
+                                onClose: onClose
+                            )
+                            .frame(width: pageW, height: totalH)
                         }
                     } else {
-                        // Single page underneath for compact/closed pose
                         if isFromRight {
-                            let nextIdx = min(totalSinglePages, singlePageIndex + 1)
+                            let nextIdx = min(totalSinglePages - 1, singlePageIndex + 1)
                             singlePageView(
-                                for: nextIdx < totalSinglePages ? nextIdx : totalSinglePages - 1,
+                                for: nextIdx,
                                 safeAreaTop: safeAreaTop,
                                 safeAreaBottom: safeAreaBottom,
                                 isDuo: isDuo
@@ -1627,7 +1738,7 @@ struct NotebookInteriorView: View {
                     }
                 }
 
-                // Layer 2: Current Spread / Single Page with smooth cutaway mask
+                // Layer 2: Current Spread / Single Page with Dynamic 2D Crease Cutaway Mask
                 Group {
                     if isWideDisplay {
                         HStack(spacing: 0) {
@@ -1673,123 +1784,62 @@ struct NotebookInteriorView: View {
                         .frame(width: totalW, height: totalH)
                     }
                 }
-                    .mask(
-                        Group {
-                            if turnProgress > 0 && isFromRight {
-                                Path { path in
-                                    let t = turnProgress
-                                    let cutX = totalW * (1.0 - t * 1.1)
-                                    path.move(to: .zero)
-                                    path.addLine(to: CGPoint(x: cutX, y: 0))
-                                    path.addLine(to: CGPoint(x: max(-20, cutX - 50), y: totalH))
-                                    path.addLine(to: CGPoint(x: 0, y: totalH))
-                                    path.closeSubpath()
+                .mask(
+                    Group {
+                        if isTurnActive {
+                            Path { path in
+                                let pb = curl.creaseBottom
+                                let pts = curl.creaseTopSide
+                                if isFromRight {
+                                    if curl.creaseHitsSide {
+                                        // Crease exits side: keep entire top of sheet, only cut out folded corner
+                                        path.move(to: CGPoint(x: -20, y: -20))
+                                        path.addLine(to: CGPoint(x: totalW + 20, y: -20))
+                                        path.addLine(to: CGPoint(x: totalW + 20, y: pts.y))
+                                        path.addLine(to: CGPoint(x: pb.x, y: totalH + 20))
+                                        path.addLine(to: CGPoint(x: -20, y: totalH + 20))
+                                        path.closeSubpath()
+                                    } else {
+                                        // Crease exits top: cut along full crease line
+                                        path.move(to: CGPoint(x: -20, y: -20))
+                                        path.addLine(to: CGPoint(x: pts.x, y: -20))
+                                        path.addLine(to: CGPoint(x: pb.x, y: totalH + 20))
+                                        path.addLine(to: CGPoint(x: -20, y: totalH + 20))
+                                        path.closeSubpath()
+                                    }
+                                } else {
+                                    if curl.creaseHitsSide {
+                                        // Crease exits left edge: keep entire top of sheet
+                                        path.move(to: CGPoint(x: pts.x, y: pts.y))
+                                        path.addLine(to: CGPoint(x: -20, y: -20))
+                                        path.addLine(to: CGPoint(x: totalW + 20, y: -20))
+                                        path.addLine(to: CGPoint(x: totalW + 20, y: totalH + 20))
+                                        path.addLine(to: CGPoint(x: pb.x, y: totalH + 20))
+                                        path.closeSubpath()
+                                    } else {
+                                        // Crease exits top: cut along full crease line
+                                        path.move(to: CGPoint(x: pts.x, y: -20))
+                                        path.addLine(to: CGPoint(x: totalW + 20, y: -20))
+                                        path.addLine(to: CGPoint(x: totalW + 20, y: totalH + 20))
+                                        path.addLine(to: CGPoint(x: pb.x, y: totalH + 20))
+                                        path.closeSubpath()
+                                    }
                                 }
-                            } else if turnProgress > 0 && !isFromRight {
-                                Path { path in
-                                    let t = turnProgress
-                                    let cutX = totalW * (t * 1.1)
-                                    path.move(to: CGPoint(x: cutX, y: 0))
-                                    path.addLine(to: CGPoint(x: totalW, y: 0))
-                                    path.addLine(to: CGPoint(x: totalW, y: totalH))
-                                    path.addLine(to: CGPoint(x: min(totalW + 20, cutX + 50), y: totalH))
-                                    path.closeSubpath()
-                                }
-                            } else {
-                                Rectangle()
                             }
+                        } else {
+                            Rectangle()
                         }
-                    )
-                    .shadow(color: .black.opacity(0.35), radius: 18, x: 0, y: 8)
-
-                    // Layer 3: Dynamic Curl Flap & Soft Contact Shadow (fades to 0 at landing)
-                    if turnProgress > 0 && turnProgress < 1.0 {
-                        Canvas { context, size in
-                            let w = size.width
-                            let h = size.height
-                            let t = turnProgress
-                            let bell = sin(t * .pi)
-                            guard bell > 0.001 else { return }
-
-                            // Heavier paper: higher arch, firmer curl radius, denser shadow
-                            let shadowAlpha = min(0.44, Double(bell) * 0.48)
-                            let curlH = bell * 34.0
-
-                            let apexX = isFromRight ? (w * (1.0 - t)) : (w * t)
-                            let apexY = h - curlH
-                            let creaseX = isFromRight
-                                ? max(0, w * (1.0 - min(1.0, t * 1.15)))
-                                : min(w, w * min(1.0, t * 1.15))
-
-                            // 1. Soft rolling ambient shadow
-                            var shadowPath = Path()
-                            shadowPath.move(to: CGPoint(x: creaseX, y: h))
-                            shadowPath.addQuadCurve(
-                                to: CGPoint(x: apexX, y: 0),
-                                control: CGPoint(x: isFromRight ? apexX - 16 : apexX + 16, y: apexY / 2)
-                            )
-                            shadowPath.addLine(to: CGPoint(x: isFromRight ? apexX + 30 : apexX - 30, y: h))
-                            shadowPath.closeSubpath()
-
-                            context.fill(shadowPath, with: .color(Color.black.opacity(shadowAlpha * 0.85)))
-
-                            // 2. Heavy contact crease shadow (darker along the fold base)
-                            var creaseLine = Path()
-                            creaseLine.move(to: CGPoint(x: creaseX, y: h))
-                            creaseLine.addQuadCurve(
-                                to: CGPoint(x: apexX, y: 0),
-                                control: CGPoint(x: isFromRight ? apexX - 8 : apexX + 8, y: apexY / 2)
-                            )
-                            context.stroke(
-                                creaseLine,
-                                with: .color(Color.black.opacity(0.35 * Double(bell))),
-                                lineWidth: 3.5
-                            )
-
-                            // 3. Thick paper flap body
-                            var flapPath = Path()
-                            flapPath.move(to: CGPoint(x: creaseX, y: h))
-                            flapPath.addQuadCurve(
-                                to: CGPoint(x: apexX, y: apexY),
-                                control: CGPoint(x: (creaseX + apexX) / 2, y: h - (bell * 6.0))
-                            )
-                            flapPath.addQuadCurve(
-                                to: CGPoint(x: isFromRight ? min(w, apexX + 32) : max(0, apexX - 32), y: 0),
-                                control: CGPoint(x: isFromRight ? apexX + 10 : apexX - 10, y: apexY / 2)
-                            )
-                            flapPath.addLine(to: CGPoint(x: creaseX, y: 0))
-                            flapPath.closeSubpath()
-
-                            // Rich warm cardstock gradient
-                            let colors = [
-                                Color(red: 0.82, green: 0.78, blue: 0.71).opacity(Double(bell)),
-                                Color(red: 0.92, green: 0.89, blue: 0.84).opacity(Double(bell)),
-                                Color(red: 0.98, green: 0.97, blue: 0.94).opacity(Double(bell)),
-                                Color(red: 0.86, green: 0.83, blue: 0.77).opacity(Double(bell))
-                            ]
-                            context.fill(
-                                flapPath,
-                                with: .linearGradient(
-                                    Gradient(colors: colors),
-                                    startPoint: CGPoint(x: creaseX, y: h),
-                                    endPoint: CGPoint(x: apexX, y: apexY)
-                                )
-                            )
-
-                            // 4. Heavy paper rim bevel highlight (top edge) and shadow (under edge)
-                            context.stroke(
-                                flapPath,
-                                with: .color(Color.black.opacity(0.24 * Double(bell))),
-                                lineWidth: 2.2
-                            )
-                            context.stroke(
-                                flapPath,
-                                with: .color(Color.white.opacity(0.65 * Double(bell))),
-                                lineWidth: 1.0
-                            )
-                        }
-                        .allowsHitTesting(false)
                     }
+                )
+
+                // Layer 3: Solid Opaque Finch 70# Paper Flap with Grid, 3D Caliper Bevel & Shadows
+                if isTurnActive && (curl.liftHeight > 0.5 || curl.progress > 0.005) {
+                    KindlePageCurlCanvas2D(
+                        state: curl,
+                        isFromRight: isFromRight,
+                        totalSize: geo.size
+                    )
+                }
 
                 // Layer 4: Center Spine ALIGNED WITH CREASE (Dual-screen wide mode only)
                 if isWideDisplay {
@@ -1799,80 +1849,109 @@ struct NotebookInteriorView: View {
                         .allowsHitTesting(false)
                 }
 
-                // Layer 5: Interactive Corner Grab Targets
-                HStack {
-                    // Left Corner Grab Target
+                // Layer 5: Interactive 2D Corner & Edge Drag Zones
+                HStack(spacing: 0) {
+                    // Left Edge & Corner Turn Strip
                     let canGoBack = isWideDisplay ? (currentSpreadIndex > 0) : true
                     if canGoBack {
-                        VStack {
-                            Spacer()
-                            Color.clear
-                                .frame(width: 88, height: 88)
-                                .contentShape(Rectangle())
-                                .gesture(
-                                    DragGesture(minimumDistance: 0)
-                                        .onChanged { value in
-                                            guard !isAnimatingTurn else { return }
-                                            if !isDragging {
-                                                isDragging = true
-                                                isFromRight = false
-                                                UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                                            }
-                                            turnProgress = max(0, min(1.0, value.translation.width / (totalW * 0.85)))
-                                        }
-                                        .onEnded { value in
-                                            guard !isAnimatingTurn else { return }
-                                            if value.translation.width > 50 || value.predictedEndTranslation.width > 90 {
-                                                completePageTurn(forward: false)
-                                            } else {
-                                                cancelPageTurn()
-                                            }
-                                        }
-                                )
-                                .onTapGesture {
-                                    guard !isAnimatingTurn else { return }
-                                    isFromRight = false
-                                    completePageTurn(forward: false)
-                                }
-                        }
-                    }
-
-                    Spacer()
-
-                    // Right Corner Grab Target
-                    VStack {
-                        Spacer()
                         Color.clear
-                            .frame(width: 88, height: 88)
+                            .frame(width: 76)
+                            .frame(maxHeight: .infinity)
                             .contentShape(Rectangle())
                             .gesture(
-                                DragGesture(minimumDistance: 0)
+                                DragGesture(minimumDistance: 4)
                                     .onChanged { value in
                                         guard !isAnimatingTurn else { return }
                                         if !isDragging {
                                             isDragging = true
-                                            isFromRight = true
-                                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                            isFromRight = false
+                                            UISelectionFeedbackGenerator().selectionChanged()
                                         }
-                                        turnProgress = max(0, min(1.0, -value.translation.width / (totalW * 0.85)))
+                                        dragOffset = value.translation
                                     }
                                     .onEnded { value in
                                         guard !isAnimatingTurn else { return }
-                                        if -value.translation.width > 50 || -value.predictedEndTranslation.width > 90 {
-                                            completePageTurn(forward: true)
+                                        let dx = value.translation.width
+                                        let predictedDx = value.predictedEndTranslation.width
+                                        let threshold = totalW * 0.32
+                                        if dx > threshold || predictedDx > threshold * 1.3 {
+                                            completePageTurn2D(forward: false, currentTravel: dx, totalW: totalW)
                                         } else {
-                                            cancelPageTurn()
+                                            cancelPageTurn2D()
                                         }
                                     }
                             )
                             .onTapGesture {
-                                guard !isAnimatingTurn else { return }
-                                isFromRight = true
-                                completePageTurn(forward: true)
+                                startTapPageTurn(forward: false)
                             }
+                    } else {
+                        Color.clear.frame(width: 76)
                     }
+
+                    // Center bottom margin swipe zone
+                    VStack(spacing: 0) {
+                        Spacer()
+                        Color.clear
+                            .frame(height: max(60, safeAreaBottom + 16))
+                            .contentShape(Rectangle())
+                            .gesture(
+                                DragGesture(minimumDistance: 4)
+                                    .onChanged { value in
+                                        guard !isAnimatingTurn else { return }
+                                        if !isDragging {
+                                            isDragging = true
+                                            isFromRight = (value.startLocation.x > totalW * 0.5)
+                                            UISelectionFeedbackGenerator().selectionChanged()
+                                        }
+                                        dragOffset = value.translation
+                                    }
+                                    .onEnded { value in
+                                        guard !isAnimatingTurn else { return }
+                                        let dx = isFromRight ? -value.translation.width : value.translation.width
+                                        let predictedDx = isFromRight ? -value.predictedEndTranslation.width : value.predictedEndTranslation.width
+                                        let threshold = totalW * 0.32
+                                        if dx > threshold || predictedDx > threshold * 1.3 {
+                                            completePageTurn2D(forward: isFromRight, currentTravel: dx, totalW: totalW)
+                                        } else {
+                                            cancelPageTurn2D()
+                                        }
+                                    }
+                            )
+                    }
+                    .frame(maxWidth: .infinity)
+
+                    // Right Edge & Corner Turn Strip
+                    Color.clear
+                        .frame(width: 76)
+                        .frame(maxHeight: .infinity)
+                        .contentShape(Rectangle())
+                        .gesture(
+                            DragGesture(minimumDistance: 4)
+                                .onChanged { value in
+                                    guard !isAnimatingTurn else { return }
+                                    if !isDragging {
+                                        isDragging = true
+                                        isFromRight = true
+                                        UISelectionFeedbackGenerator().selectionChanged()
+                                    }
+                                    dragOffset = value.translation
+                                }
+                                .onEnded { value in
+                                    guard !isAnimatingTurn else { return }
+                                    let dx = -value.translation.width
+                                    let predictedDx = -value.predictedEndTranslation.width
+                                    let threshold = totalW * 0.32
+                                    if dx > threshold || predictedDx > threshold * 1.3 {
+                                        completePageTurn2D(forward: true, currentTravel: dx, totalW: totalW)
+                                    } else {
+                                        cancelPageTurn2D()
+                                    }
+                                }
+                        )
+                        .onTapGesture {
+                            startTapPageTurn(forward: true)
+                        }
                 }
-                .padding(.bottom, max(8, safeAreaBottom))
             }
         }
         .onAppear {
@@ -1910,16 +1989,29 @@ struct NotebookInteriorView: View {
         .frame(width: 20)
     }
 
-    private func completePageTurn(forward: Bool) {
+    private func startTapPageTurn(forward: Bool) {
+        guard !isAnimatingTurn else { return }
+        isFromRight = forward
+        completePageTurn2D(forward: forward, currentTravel: 0.0, totalW: 1.0)
+    }
+
+    // Weighted, organic Kindle-style page turn spring physics with natural 2D lift arc
+    private func completePageTurn2D(forward: Bool, currentTravel: CGFloat, totalW: CGFloat) {
         guard !isAnimatingTurn else { return }
         isAnimatingTurn = true
-        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        isDragging = false
+        isFromRight = forward
 
-        withAnimation(.interpolatingSpring(stiffness: 125, damping: 18)) {
+        let initialProgress = max(0.0, min(0.92, currentTravel / max(1.0, totalW)))
+        turnProgress = initialProgress
+        UISelectionFeedbackGenerator().selectionChanged()
+
+        // Mass 1.15, stiffness 72, damping 14.5 replicates physical paper flex and smooth inertia
+        withAnimation(.interpolatingSpring(mass: 1.15, stiffness: 72, damping: 14.5)) {
             turnProgress = 1.0
         }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.38) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.44) {
             if isWideDisplay {
                 if forward {
                     if currentSpreadIndex < notebook.spreads.count - 1 {
@@ -1953,18 +2045,193 @@ struct NotebookInteriorView: View {
                     }
                 }
             }
-            UIImpactFeedbackGenerator(style: .heavy).impactOccurred()
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
             turnProgress = 0.0
-            isDragging = false
+            dragOffset = .zero
             isAnimatingTurn = false
         }
     }
 
-    private func cancelPageTurn() {
-        withAnimation(.interpolatingSpring(stiffness: 175, damping: 20)) {
+    private func cancelPageTurn2D() {
+        withAnimation(.interpolatingSpring(mass: 1.0, stiffness: 88, damping: 16)) {
+            dragOffset = .zero
             turnProgress = 0.0
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
             isDragging = false
         }
+    }
+}
+
+// MARK: - Matte Finch 70# Cardstock 2D Dynamic Page Curl Canvas
+
+struct KindlePageCurlCanvas2D: View {
+    let state: KindleCurlGeometry2D.CurlState
+    let isFromRight: Bool
+    let totalSize: CGSize
+
+    var body: some View {
+        Canvas { context, size in
+            let w = size.width
+            let h = size.height
+            let cb = state.cornerBottom
+            let pb = state.creaseBottom
+            let pts = state.creaseTopSide
+            let ct = state.cornerTop
+            let ctrlB = state.ctrlBottom
+            let ctrlS = state.ctrlSide
+            let lift = state.liftHeight
+            let progress = state.progress
+
+            guard lift > 0.5 || progress > 0.005 else { return }
+
+            let bell = sin(progress * .pi)
+
+            // Construct the complete, continuous flap path of the turned leaf
+            var flapPath = Path()
+            flapPath.move(to: pb)
+            if let ct = ct {
+                // Four-sided turned page (crease exits top edge)
+                flapPath.addLine(to: pts)
+                flapPath.addLine(to: ct)
+                flapPath.addQuadCurve(to: cb, control: ctrlS)
+                flapPath.addQuadCurve(to: pb, control: ctrlB)
+            } else {
+                // Three-sided turned corner (crease exits side edge)
+                flapPath.addLine(to: pts)
+                flapPath.addQuadCurve(to: cb, control: ctrlS)
+                flapPath.addQuadCurve(to: pb, control: ctrlB)
+            }
+            flapPath.closeSubpath()
+
+            // 1. Natural Floating Drop Shadow (Follows the lifted page, NOT fixed to screen bottom)
+            let shadowOffset = CGSize(
+                width: (isFromRight ? -6.0 : 6.0) - (isFromRight ? 1.0 : -1.0) * lift * 0.03,
+                height: 5.0 + lift * 0.04
+            )
+
+            var floatingShadowPath = Path()
+            floatingShadowPath.move(to: pb)
+            if let ct = ct {
+                floatingShadowPath.addLine(to: CGPoint(x: pts.x + shadowOffset.width, y: pts.y + shadowOffset.height))
+                floatingShadowPath.addLine(to: CGPoint(x: ct.x + shadowOffset.width, y: ct.y + shadowOffset.height))
+                floatingShadowPath.addQuadCurve(
+                    to: CGPoint(x: cb.x + shadowOffset.width, y: cb.y + shadowOffset.height),
+                    control: CGPoint(x: ctrlS.x + shadowOffset.width, y: ctrlS.y + shadowOffset.height)
+                )
+                floatingShadowPath.addQuadCurve(
+                    to: pb,
+                    control: CGPoint(x: ctrlB.x + shadowOffset.width * 0.6, y: ctrlB.y + shadowOffset.height * 0.6)
+                )
+            } else {
+                floatingShadowPath.addLine(to: CGPoint(x: pts.x + shadowOffset.width, y: pts.y + shadowOffset.height))
+                floatingShadowPath.addQuadCurve(
+                    to: CGPoint(x: cb.x + shadowOffset.width, y: cb.y + shadowOffset.height),
+                    control: CGPoint(x: ctrlS.x + shadowOffset.width, y: ctrlS.y + shadowOffset.height)
+                )
+                floatingShadowPath.addQuadCurve(
+                    to: pb,
+                    control: CGPoint(x: ctrlB.x + shadowOffset.width * 0.6, y: ctrlB.y + shadowOffset.height * 0.6)
+                )
+            }
+            floatingShadowPath.closeSubpath()
+
+            context.fill(
+                floatingShadowPath,
+                with: .color(Color(red: 0.16, green: 0.14, blue: 0.11).opacity(min(0.24, 0.08 + Double(lift) / 450.0)))
+            )
+
+            // 2. Soft contact shadow along the fold crease
+            var tightShadowPath = Path()
+            tightShadowPath.move(to: pb)
+            tightShadowPath.addLine(to: pts)
+            context.stroke(
+                tightShadowPath,
+                with: .color(Color(red: 0.18, green: 0.15, blue: 0.12).opacity(min(0.32, 0.12 + Double(bell) * 0.18))),
+                lineWidth: 3.0
+            )
+
+            // 2. 100% SOLID OPAQUE MATTE FINCH 70# CARDSTOCK BASE
+            // Warm cream uncoated paper with zero gloss or transparency
+            context.fill(
+                flapPath,
+                with: .color(Color(red: 0.965, green: 0.952, blue: 0.925))
+            )
+
+            // 3. Subtle Printed 3/16" Graph Grid on the Reverse Face of the Sheet
+            context.drawLayer { layerContext in
+                layerContext.clip(to: flapPath)
+
+                let gridStep: CGFloat = 14.0
+                let gridColor = Color(red: 0.48, green: 0.58, blue: 0.68).opacity(0.18)
+                var gridPath = Path()
+
+                // Vertical grid lines
+                var gx: CGFloat = 0
+                while gx <= w + 40 {
+                    gridPath.move(to: CGPoint(x: gx, y: -20))
+                    gridPath.addLine(to: CGPoint(x: gx, y: h + 20))
+                    gx += gridStep
+                }
+
+                // Horizontal grid lines
+                var gy: CGFloat = 0
+                while gy <= h + 40 {
+                    gridPath.move(to: CGPoint(x: -20, y: gy))
+                    gridPath.addLine(to: CGPoint(x: w + 20, y: gy))
+                    gy += gridStep
+                }
+
+                layerContext.stroke(gridPath, with: .color(gridColor), lineWidth: 0.8)
+
+                // 4. Subtle Matte Diffuse Shading Only (Zero Specular Shininess / No Gloss)
+                // Natural soft ambient trough shadow at the crease, smoothly blending into matte paper
+                let matteLightingColors = [
+                    Color(red: 0.28, green: 0.24, blue: 0.19).opacity(min(0.20, 0.06 + Double(bell) * 0.14)), // Crease ambient trough
+                    Color(red: 0.75, green: 0.72, blue: 0.66).opacity(0.12),
+                    Color(red: 0.92, green: 0.90, blue: 0.85).opacity(0.04),
+                    Color.clear
+                ]
+
+                let lightStart = CGPoint(x: (pb.x + pts.x) / 2, y: (pb.y + pts.y) / 2)
+                let lightEnd = cb
+
+                layerContext.fill(
+                    flapPath,
+                    with: .linearGradient(
+                        Gradient(colors: matteLightingColors),
+                        startPoint: lightStart,
+                        endPoint: lightEnd
+                    )
+                )
+            }
+
+            // 5. Natural Matte Paper Fiber Edge (No Shiny Plastic Catch-Lights)
+            var freeEdges = Path()
+            freeEdges.move(to: pb)
+            freeEdges.addQuadCurve(to: cb, control: ctrlB)
+            if let ct = ct {
+                freeEdges.addQuadCurve(to: ct, control: ctrlS)
+                freeEdges.addLine(to: pts)
+            } else {
+                freeEdges.addQuadCurve(to: pts, control: ctrlS)
+            }
+
+            // Layer A: Soft warm edge shadow
+            context.stroke(
+                freeEdges,
+                with: .color(Color(red: 0.25, green: 0.21, blue: 0.17).opacity(0.25)),
+                lineWidth: 1.8
+            )
+
+            // Layer B: Natural matte paper fiber core (warm off-white cardstock tooth)
+            context.stroke(
+                freeEdges,
+                with: .color(Color(red: 0.93, green: 0.91, blue: 0.86)),
+                lineWidth: 1.2
+            )
+        }
+        .allowsHitTesting(false)
     }
 }
 

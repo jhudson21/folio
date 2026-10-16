@@ -147,4 +147,43 @@ struct FolioModelTests {
         let iphoneSE = CGSize(width: 375, height: 667)
         #expect(isDuoAspectRatio(geometrySize: iphoneSE) == false)
     }
+
+    @Test func testKindleCurlGeometry2DCornerLiftAndPull() {
+        let size = CGSize(width: 932, height: 678)
+        let restCorner = CGPoint(x: 932, y: 678)
+
+        // 1. At rest
+        let restState = KindleCurlGeometry2D.calculate(corner: restCorner, restCorner: restCorner, totalSize: size, isFromRight: true)
+        #expect(restState.liftHeight == 0.0)
+        #expect(restState.progress == 0.0)
+
+        // 2. Corner lifted up 128pt and pulled left 182pt to (750, 550)
+        let liftedCorner = CGPoint(x: 750, y: 550)
+        let liftedState = KindleCurlGeometry2D.calculate(corner: liftedCorner, restCorner: restCorner, totalSize: size, isFromRight: true)
+        #expect(liftedState.liftHeight == 128.0)
+        #expect(liftedState.creaseBottom.x < 932.0) // Bottom edge has lifted and moved in
+        #expect(liftedState.ctrlBottom.y < 678.0) // Bottom edge curves upward
+        #expect(liftedState.progress > 0.15)
+
+        // 3. Corner pulled past the center spine (400, 500)
+        let pastSpineCorner = CGPoint(x: 400, y: 500)
+        let pastSpineState = KindleCurlGeometry2D.calculate(corner: pastSpineCorner, restCorner: restCorner, totalSize: size, isFromRight: true)
+        #expect(pastSpineState.progress > 0.50)
+        #expect(pastSpineState.creaseBottom.x < 700.0)
+        #expect(pastSpineState.creaseTopSide.y == 0.0) // Crease line extends through top edge
+        #expect(pastSpineState.creaseHitsSide == false) // Crease reaches top edge
+        #expect(pastSpineState.cornerTop != nil) // Top corner reflected for complete thick leaf
+    }
+
+    @Test func testKindleCurlGeometry2DBackwardTurn() {
+        let size = CGSize(width: 932, height: 678)
+        let restCorner = CGPoint(x: 0, y: 678)
+
+        // Lift left corner up 128pt and pull right 200pt
+        let liftedCorner = CGPoint(x: 200, y: 550)
+        let state = KindleCurlGeometry2D.calculate(corner: liftedCorner, restCorner: restCorner, totalSize: size, isFromRight: false)
+        #expect(state.liftHeight == 128.0)
+        #expect(state.creaseBottom.x > 0.0) // Bottom edge moves to the right
+        #expect(state.progress > 0.15)
+    }
 }
